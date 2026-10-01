@@ -1,5 +1,7 @@
 import { create } from 'zustand'
-import type { Comment, EditConflict, Paragraph, Reply, Role, Version } from '../types'
+import { fetchProof } from '../services/mockApi'
+import { applyProofReconciliation, reconcileProof, splitParagraphIntoTwo } from '../utils/proof'
+import type { Comment, EditConflict, Paragraph, ProofDecision, ProofRecord, Reply, Role, Version } from '../types'
 
 const DRAFT_KEY = 'sologsb-1002-draft-v1'
 const id = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -7,8 +9,8 @@ const id = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.rand
 const baseParagraphs: Paragraph[] = [
   { id: 'p-01', section: '摘要', number: '1.', text: '开源软件供应链的稳定性不仅取决于代码质量，也取决于维护者能否持续识别并回应社区需求。', original: '开源软件供应链的稳定性不仅取决于代码质量，也取决于维护者能否持续识别并回应社区需求。', status: 'accepted', highlighted: false },
   { id: 'p-02', section: '1 引言', number: '2.', text: '近年来，大型语言模型被广泛用于代码生成与缺陷定位，但其在真实维护工作流中的影响仍缺少系统证据。', original: '近年来，大型语言模型被广泛用于代码生成与缺陷定位，但其在真实维护工作流中的影响仍缺少系统证据。', status: 'open', highlighted: true },
-  { id: 'p-03', section: '1 引言', number: '3.', text: '本文收集 12 个活跃开源项目连续 18 个月的议题记录，并访谈 26 位核心维护者。', original: '本文收集 12 个活跃开源项目连续 18 个月的议题记录，并访谈 26 位核心维护者。', status: 'open', highlighted: true },
-  { id: 'p-04', section: '2 方法', number: '4.', text: '我们采用混合研究方法，将议题生命周期划分为响应、评审与合并三个阶段。编码过程由两名研究者独立完成。', original: '我们采用混合研究方法，将议题生命周期划分为响应、评审与合并三个阶段。编码过程由两名研究者独立完成。', status: 'open', highlighted: false },
+  { id: 'p-03', section: '1 引言', number: '3.', text: '本文收集 12 个活跃开源项目连续 18 个月的议题记录，并访谈 26 位核心维护者，受访者均有三年以上维护经验。', original: '本文收集 12 个活跃开源项目连续 18 个月的议题记录，并访谈 26 位核心维护者。', status: 'open', highlighted: true },
+  { id: 'p-04', section: '2 方法', number: '4.', text: '我们采用混合研究方法，将议题生命周期划分为响应、评审与合并三个阶段，并据此设计编码方案。编码过程由两名研究者独立完成。', original: '我们采用混合研究方法，将议题生命周期划分为响应、评审与合并三个阶段。编码过程由两名研究者独立完成。', status: 'open', highlighted: false },
   { id: 'p-05', section: '2 方法', number: '5.', text: '当编码结果不一致时，研究者通过讨论达成一致；若仍有分歧，则邀请第三位研究者裁决。', original: '当编码结果不一致时，研究者通过讨论达成一致；若仍有分歧，则邀请第三位研究者裁决。', status: 'accepted', highlighted: true },
   { id: 'p-06', section: '3 结果', number: '6.', text: '初步结果显示，辅助工具缩短了首次响应时间，但没有显著降低维护者处理复杂议题的认知负担。', original: '初步结果显示，辅助工具缩短了首次响应时间，但没有显著降低维护者处理复杂议题的认知负担。', status: 'open', highlighted: true },
   { id: 'p-07', section: '3 结果', number: '7.', text: '在高活跃度项目中，维护者更关注建议是否可验证，而非建议生成速度。', original: '在高活跃度项目中，维护者更关注建议是否可验证，而非建议生成速度。', status: 'open', highlighted: false },
@@ -22,16 +24,17 @@ const baseComments: Comment[] = [
   { id: 'c-06', paragraphId: 'p-06', author: '审稿人 B', role: 'reviewer', type: 'suggestion', quote: '但没有显著降低维护者处理复杂议题的认知负担', body: '“显著”需要给出统计检验与效应量。', suggestion: '初步结果显示，辅助工具缩短了首次响应时间，但对复杂议题处理时长与自我报告认知负担均未产生统计显著影响。', status: 'open', replies: [], createdAt: Date.now() - 36000000 },
 ]
 const seed = typeof localStorage !== 'undefined' ? localStorage.getItem(DRAFT_KEY) : null
-const parsed = seed ? JSON.parse(seed) as Partial<{ paragraphs: Paragraph[]; comments: Comment[]; versions: Version[] }> : null
+const parsed = seed ? JSON.parse(seed) as Partial<{ paragraphs: Paragraph[]; comments: Comment[]; versions: Version[]; proofs: ProofRecord[] }> : null
 const initialParagraphs = parsed?.paragraphs?.length ? parsed.paragraphs : baseParagraphs
 const initialComments = parsed?.comments ?? baseComments
 const initialVersions: Version[] = parsed?.versions ?? [
   { id: 'v-01', label: '投稿初稿 v1', createdAt: Date.now() - 1209600000, paragraphs: JSON.parse(JSON.stringify(baseParagraphs)) as Paragraph[] },
   { id: 'v-02', label: '审阅基线 v2', createdAt: Date.now() - 172800000, paragraphs: JSON.parse(JSON.stringify(baseParagraphs.map((p) => p.id === 'p-04' ? { ...p, text: `${p.text} 编码规则在预注册方案中说明。` } : p))) as Paragraph[] },
 ]
+const initialProofs: ProofRecord[] = parsed?.proofs ?? []
 
-const persistDraft = (paragraphs: Paragraph[], comments: Comment[], versions: Version[]) => {
-  localStorage.setItem(DRAFT_KEY, JSON.stringify({ paragraphs, comments, versions }))
+const persistDraft = (paragraphs: Paragraph[], comments: Comment[], versions: Version[], proofs: ProofRecord[]) => {
+  localStorage.setItem(DRAFT_KEY, JSON.stringify({ paragraphs, comments, versions, proofs }))
 }
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 
@@ -40,13 +43,15 @@ interface ReviewState {
   paragraphs: Paragraph[]
   comments: Comment[]
   versions: Version[]
+  proofs: ProofRecord[]
+  proofModalOpen: boolean
   selectedParagraphId: string
   commentFilter: 'all' | 'open' | 'suggestion' | 'duplicate'
   revisionMode: boolean
   dirty: boolean
   conflicts: EditConflict[]
-  past: { paragraphs: Paragraph[]; comments: Comment[]; versions: Version[] }[]
-  future: { paragraphs: Paragraph[]; comments: Comment[]; versions: Version[] }[]
+  past: { paragraphs: Paragraph[]; comments: Comment[]; versions: Version[]; proofs: ProofRecord[] }[]
+  future: { paragraphs: Paragraph[]; comments: Comment[]; versions: Version[]; proofs: ProofRecord[] }[]
   setRole: (role: Role) => void
   selectParagraph: (id: string) => void
   setCommentFilter: (filter: ReviewState['commentFilter']) => void
@@ -61,6 +66,10 @@ interface ReviewState {
   addConflict: (conflict: EditConflict) => void
   resolveConflict: (conflictId: string, strategy: 'local' | 'remote') => void
   dismissConflict: (conflictId: string) => void
+  setProofModalOpen: (open: boolean) => void
+  importProof: () => Promise<{ ok: boolean; duplicated?: boolean; error?: string }>
+  activateProofVariant: (paragraphId: string, variantId: string) => void
+  resolveProofItem: (recordId: string, itemId: string, decision: ProofDecision) => void
   undo: () => void
   redo: () => void
   save: () => void
@@ -69,12 +78,13 @@ interface ReviewState {
 
 export const useReviewStore = create<ReviewState>((set, get) => {
   const record = (producer: (state: ReviewState) => Partial<ReviewState>) => set((state) => {
-    const history = { paragraphs: clone(state.paragraphs), comments: clone(state.comments), versions: clone(state.versions) }
+    const history = { paragraphs: clone(state.paragraphs), comments: clone(state.comments), versions: clone(state.versions), proofs: clone(state.proofs) }
     const next = producer(state)
     const paragraphs = next.paragraphs ?? state.paragraphs
     const comments = next.comments ?? state.comments
     const versions = next.versions ?? state.versions
-    persistDraft(paragraphs, comments, versions)
+    const proofs = next.proofs ?? state.proofs
+    persistDraft(paragraphs, comments, versions, proofs)
     return { ...next, past: [...state.past.slice(-49), history], future: [], dirty: true }
   })
 
@@ -83,6 +93,8 @@ export const useReviewStore = create<ReviewState>((set, get) => {
     paragraphs: initialParagraphs,
     comments: initialComments,
     versions: initialVersions,
+    proofs: initialProofs,
+    proofModalOpen: false,
     selectedParagraphId: 'p-02',
     commentFilter: 'all',
     revisionMode: false,
@@ -148,28 +160,139 @@ export const useReviewStore = create<ReviewState>((set, get) => {
       }
     }),
     dismissConflict: (conflictId) => set((state) => ({ conflicts: state.conflicts.filter((item) => item.id !== conflictId) })),
+    setProofModalOpen: (proofModalOpen) => set({ proofModalOpen }),
+    importProof: async () => {
+      const state = get()
+      const failed = state.proofs.find((item) => item.status === 'failed')
+      const recordId = failed?.id ?? id('proof')
+      if (failed) {
+        set((current) => ({ proofs: current.proofs.map((item) => item.id === recordId ? { ...item, status: 'reconciling', error: undefined } : item) }))
+      } else {
+        set((current) => ({
+          proofs: [{ id: recordId, hash: null, label: '期刊校样', importedAt: Date.now(), status: 'reconciling', paragraphs: [], items: [] }, ...current.proofs],
+        }))
+      }
+      try {
+        const dto = await fetchProof(get().paragraphs)
+        if (get().proofs.some((item) => item.hash === dto.hash && item.status === 'done')) {
+          set((current) => ({ proofs: current.proofs.filter((item) => item.id !== recordId) }))
+          return { ok: true, duplicated: true }
+        }
+        const items = reconcileProof(get().paragraphs, dto.paragraphs)
+        record((current) => ({
+          paragraphs: applyProofReconciliation(current.paragraphs, items, dto.paragraphs.map((paragraph) => paragraph.id)),
+          proofs: current.proofs.map((item) => item.id === recordId ? {
+            ...item,
+            hash: dto.hash,
+            label: dto.label,
+            importedAt: Date.now(),
+            status: 'done',
+            paragraphs: dto.paragraphs,
+            items,
+          } : item),
+        }))
+        return { ok: true }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '校样对账失败'
+        set((current) => ({ proofs: current.proofs.map((item) => item.id === recordId ? { ...item, status: 'failed', error: message } : item) }))
+        return { ok: false, error: message }
+      }
+    },
+    activateProofVariant: (paragraphId, variantId) => record((state) => ({
+      paragraphs: state.paragraphs.map((paragraph) => {
+        if (paragraph.id !== paragraphId || !paragraph.proofVariants) return paragraph
+        const variant = paragraph.proofVariants.find((item) => item.id === variantId)
+        if (!variant) return paragraph
+        return {
+          ...paragraph,
+          text: variant.text,
+          proofVariants: paragraph.proofVariants.map((item) => ({ ...item, active: item.id === variantId })),
+        }
+      }),
+    })),
+    resolveProofItem: (recordId, itemId, decision) => record((state) => {
+      const proofRecord = state.proofs.find((item) => item.id === recordId)
+      const item = proofRecord?.items.find((entry) => entry.id === itemId)
+      if (!proofRecord || !item) return state
+      let paragraphs = state.paragraphs
+      switch (decision) {
+        case 'accept-split': {
+          const target = paragraphs.find((paragraph) => paragraph.id === item.reviewParagraphId)
+          if (target && item.proofTexts?.length) {
+            const index = paragraphs.findIndex((paragraph) => paragraph.id === item.reviewParagraphId)
+            const split = splitParagraphIntoTwo(target, item.proofTexts)
+            paragraphs = [...paragraphs.slice(0, index), ...split, ...paragraphs.slice(index + 1)]
+          }
+          break
+        }
+        case 'keep-review':
+        case 'keep-paragraph':
+          paragraphs = paragraphs.map((paragraph) => paragraph.id === item.reviewParagraphId ? { ...paragraph, proofState: 'matched', proofSuspended: false } : paragraph)
+          break
+        case 'confirm-remove':
+          paragraphs = paragraphs.filter((paragraph) => paragraph.id !== item.reviewParagraphId)
+          break
+        case 'accept-add': {
+          const proofText = item.proofText
+          if (proofText) {
+            const newParagraph: Paragraph = {
+              id: id('p'),
+              section: '新增段落',
+              number: '＋',
+              text: proofText,
+              original: proofText,
+              status: 'open',
+              highlighted: true,
+              proofState: 'use-proof',
+              proofSuspended: false,
+            }
+            const proofOrder = proofRecord.paragraphs.map((paragraph) => paragraph.id)
+            const proofIdx = proofOrder.indexOf(item.proofParagraphIds[0])
+            let insertAt = paragraphs.length
+            for (let k = proofIdx - 1; k >= 0; k--) {
+              const previous = proofRecord.items.find((entry) => entry.proofParagraphIds[0] === proofOrder[k] && entry.reviewParagraphId && entry.status !== 'added')
+              if (previous) {
+                const reviewIdx = paragraphs.findIndex((paragraph) => paragraph.id === previous.reviewParagraphId)
+                if (reviewIdx >= 0) { insertAt = reviewIdx + 1; break }
+              }
+            }
+            paragraphs = [...paragraphs.slice(0, insertAt), newParagraph, ...paragraphs.slice(insertAt)]
+          }
+          break
+        }
+        case 'ignore-add':
+          break
+      }
+      return {
+        paragraphs,
+        proofs: state.proofs.map((entry) => entry.id === recordId ? {
+          ...entry,
+          items: entry.items.map((inner) => inner.id === itemId ? { ...inner, resolved: true, resolution: decision } : inner),
+        } : entry),
+      }
+    }),
     undo: () => set((state) => {
       const previous = state.past.at(-1)
       if (!previous) return state
-      const current = { paragraphs: clone(state.paragraphs), comments: clone(state.comments), versions: clone(state.versions) }
-      persistDraft(previous.paragraphs, previous.comments, previous.versions)
+      const current = { paragraphs: clone(state.paragraphs), comments: clone(state.comments), versions: clone(state.versions), proofs: clone(state.proofs) }
+      persistDraft(previous.paragraphs, previous.comments, previous.versions, previous.proofs)
       return { ...previous, past: state.past.slice(0, -1), future: [current, ...state.future], dirty: true }
     }),
     redo: () => set((state) => {
       const next = state.future[0]
       if (!next) return state
-      const current = { paragraphs: clone(state.paragraphs), comments: clone(state.comments), versions: clone(state.versions) }
-      persistDraft(next.paragraphs, next.comments, next.versions)
+      const current = { paragraphs: clone(state.paragraphs), comments: clone(state.comments), versions: clone(state.versions), proofs: clone(state.proofs) }
+      persistDraft(next.paragraphs, next.comments, next.versions, next.proofs)
       return { ...next, past: [...state.past, current], future: state.future.slice(1), dirty: true }
     }),
     save: () => {
-      persistDraft(get().paragraphs, get().comments, get().versions)
+      persistDraft(get().paragraphs, get().comments, get().versions, get().proofs)
       set({ dirty: false })
     },
     resetDemo: () => {
       localStorage.removeItem(DRAFT_KEY)
-      set({ paragraphs: clone(baseParagraphs), comments: clone(baseComments), versions: clone(initialVersions), conflicts: [], past: [], future: [], dirty: false })
-      persistDraft(baseParagraphs, baseComments, initialVersions)
+      set({ paragraphs: clone(baseParagraphs), comments: clone(baseComments), versions: clone(initialVersions), proofs: [], conflicts: [], past: [], future: [], dirty: false })
+      persistDraft(baseParagraphs, baseComments, initialVersions, [])
     },
   }
 })

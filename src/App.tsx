@@ -2,13 +2,14 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowLeftOutlined, ArrowRightOutlined, BranchesOutlined, CheckOutlined, CloseOutlined,
   CommentOutlined, DiffOutlined, DeleteOutlined, FileDoneOutlined, FileTextOutlined,
-  HistoryOutlined, LockOutlined, MenuFoldOutlined, MessageOutlined, PlusOutlined,
+  HistoryOutlined, ImportOutlined, LockOutlined, MenuFoldOutlined, MessageOutlined, PlusOutlined,
   RedoOutlined, SaveOutlined, SendOutlined, SwapOutlined, UndoOutlined, UnlockOutlined, UserSwitchOutlined,
 } from '@ant-design/icons'
 import { Alert, Badge, Button, Card, Checkbox, Divider, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, message } from 'antd'
 import { submitRemotePatch } from './services/mockApi'
 import { useReviewStore } from './store/review'
-import type { Comment, CommentType, Paragraph, Role } from './types'
+import ProofModal from './components/ProofModal'
+import type { Comment, CommentType, Paragraph, ReconcileItem, Role } from './types'
 
 const roleMeta: Record<Role, { label: string; description: string; color: string }> = {
   author: { label: '作者工作区', description: '编辑正文，逐条接受或拒绝修改建议', color: '#2f6f5e' },
@@ -21,8 +22,10 @@ const formatDate = (value: number) => new Date(value).toLocaleString('zh-CN', { 
 export default function App() {
   const {
     role, paragraphs, comments, versions, selectedParagraphId, commentFilter, revisionMode, dirty, conflicts,
+    proofs, proofModalOpen,
     setRole, selectParagraph, setCommentFilter, setRevisionMode, updateParagraph, addComment, replyComment,
     resolveSuggestion, mergeComment, toggleLock, createVersion, addConflict, resolveConflict, dismissConflict,
+    setProofModalOpen, importProof, activateProofVariant, resolveProofItem,
     undo, redo, save, resetDemo,
   } = useReviewStore()
   const [composerOpen, setComposerOpen] = useState(false)
@@ -43,6 +46,15 @@ export default function App() {
     return acc
   }, {}), [comments])
   const duplicateParagraphIds = useMemo(() => new Set(Object.entries(paragraphCommentCounts).filter(([, count]) => count > 1).map(([id]) => id)), [paragraphCommentCounts])
+  const pendingProofItems = useMemo(() => proofs.flatMap((record) => record.items.filter((item) => !item.resolved && item.status !== 'matched' && item.status !== 'use-proof' && item.status !== 'keep-review')), [proofs])
+  const pendingProofCount = pendingProofItems.length
+  const pendingProofItemFor = (paragraphId: string): { recordId: string; item: ReconcileItem } | undefined => {
+    for (const record of proofs) {
+      const item = record.items.find((entry) => entry.reviewParagraphId === paragraphId && !entry.resolved && entry.status !== 'matched' && entry.status !== 'use-proof' && entry.status !== 'keep-review')
+      if (item) return { recordId: record.id, item }
+    }
+    return undefined
+  }
   const visibleComments = useMemo(() => comments.filter((comment) => {
     if (commentFilter === 'open') return comment.status === 'open'
     if (commentFilter === 'suggestion') return comment.type === 'suggestion' && comment.status === 'open'
@@ -136,6 +148,9 @@ export default function App() {
           <Button icon={<UndoOutlined />} disabled={!useReviewStore.getState().past.length} onClick={undo} />
           <Button icon={<RedoOutlined />} disabled={!useReviewStore.getState().future.length} onClick={redo} />
           <Button danger={conflicts.length > 0} icon={<SwapOutlined />} onClick={() => void handleMockConflict()}>模拟冲突</Button>
+          <Badge count={pendingProofCount} size="small" offset={[-4, 2]}>
+            <Button icon={<ImportOutlined />} onClick={() => setProofModalOpen(true)}>导入校样</Button>
+          </Badge>
         </Space>
       </header>
 
@@ -225,6 +240,54 @@ export default function App() {
                     ) : (
                       <p className="paragraph-text">{paragraph.text}</p>
                     )}
+                    {paragraph.proofSuspended && pendingProofItemFor(paragraph.id) && (() => {
+                      const pending = pendingProofItemFor(paragraph.id)!
+                      const isEditor = role === 'editor'
+                      const message = pending.item.status === 'split'
+                        ? '校样将本段拆为两段'
+                        : pending.item.status === 'removed'
+                          ? '校样整段删除本段'
+                          : '校样新增段落'
+                      const description = pending.item.status === 'split'
+                        ? '排版把一段拆成了多段，审阅台正文与批注未动，等待编辑确认是否采用校样拆分。'
+                        : pending.item.status === 'removed'
+                          ? '排版在校样中拿掉了这一段，作者的修订与意见仍保留在审阅台，等待编辑确认。'
+                          : '排版在校样中新增了这一段，等待编辑确认是否加入正文。'
+                      const actions = isEditor ? (
+                        pending.item.status === 'split' ? (
+                          <Space><Button size="small" type="primary" onClick={() => resolveProofItem(pending.recordId, pending.item.id, 'accept-split')}>采用校样拆为{pending.item.proofTexts?.length ?? 2}段</Button><Button size="small" onClick={() => resolveProofItem(pending.recordId, pending.item.id, 'keep-review')}>保留审阅台段落</Button></Space>
+                        ) : pending.item.status === 'removed' ? (
+                          <Space><Button size="small" danger type="primary" onClick={() => resolveProofItem(pending.recordId, pending.item.id, 'confirm-remove')}>确认删除</Button><Button size="small" onClick={() => resolveProofItem(pending.recordId, pending.item.id, 'keep-paragraph')}>保留段落</Button></Space>
+                        ) : (
+                          <Space><Button size="small" type="primary" onClick={() => resolveProofItem(pending.recordId, pending.item.id, 'accept-add')}>加入正文</Button><Button size="small" onClick={() => resolveProofItem(pending.recordId, pending.item.id, 'ignore-add')}>忽略</Button></Space>
+                        )
+                      ) : <span className="proof-role-hint">待编辑处理</span>
+                      return <Alert className="proof-banner" type="warning" showIcon message={message} description={description} action={actions} />
+                    })()}
+                    {paragraph.proofVariants?.length ? (
+                      <div className="proof-versions">
+                        <div className="proof-versions-head">
+                          <Tag color={paragraph.proofState === 'conflict' ? 'orange' : 'blue'}>{paragraph.proofState === 'conflict' ? '两版待选' : '保留审阅台'}</Tag>
+                          <span>期刊校样已排版完成，与审阅台正文并排对照，落选版本留存可随时调回</span>
+                        </div>
+                        <div className="proof-version-grid">
+                          {paragraph.proofVariants.map((variant) => (
+                            <div key={variant.id} className={`proof-version ${variant.active ? 'active' : ''}`}>
+                              <small>{variant.source === 'review' ? '审阅台修订' : '期刊校样'}{variant.active ? ' · 当前采用' : ' · 落选留存'}</small>
+                              <p>{variant.text}</p>
+                              {!variant.active && (role === 'author' || role === 'editor') && (
+                                <Button size="small" type={variant.source === 'proof' ? 'primary' : 'default'} onClick={() => activateProofVariant(paragraph.id, variant.id)}>
+                                  {variant.source === 'proof' ? '采用校样版' : '切回审阅台版'}
+                                </Button>
+                              )}
+                              {!variant.active && role !== 'author' && role !== 'editor' && <span className="proof-role-hint">作者可选定版本</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : paragraph.proofState === 'use-proof' ? (
+                      <Tag className="proof-adopted-tag" color="green" icon={<CheckOutlined />}>已按期刊校样更新</Tag>
+                    ) : null}
                     <div className="paragraph-actions">
                       {role === 'reviewer' && <><Button size="small" icon={<CommentOutlined />} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openComposer('comment') }}>添加批注</Button><Button size="small" icon={<FileDoneOutlined />} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openComposer('suggestion') }}>提出建议</Button></>}
                       {role === 'editor' && <Button size="small" icon={paragraph.status === 'locked' ? <UnlockOutlined /> : <LockOutlined />} onClick={(event) => { event.stopPropagation(); toggleLock(paragraph.id) }}>{paragraph.status === 'locked' ? '解除锁定' : '锁定段落'}</Button>}
@@ -251,7 +314,7 @@ export default function App() {
               const paragraph = paragraphs.find((item) => item.id === comment.paragraphId)
               return (
                 <Card key={comment.id} size="small" className={`comment-card ${comment.status}`} title={<span>{comment.author} <Tag>{comment.type === 'suggestion' ? '修改建议' : '段落批注'}</Tag></span>} extra={<small>{formatDate(comment.createdAt)}</small>}>
-                  <button className="quote-line" onClick={() => paragraph && scrollToParagraph(paragraph.id)}>“{comment.quote}” · 段落 {paragraph?.number}</button>
+                  <button className="quote-line" onClick={() => paragraph && scrollToParagraph(paragraph.id)}>“{comment.quote}” · {paragraph ? `段落 ${paragraph.number}` : '段落已在校样处理中删除'}</button>
                   <p className="comment-body">{comment.body}</p>
                   {comment.suggestion && <div className="suggestion-box"><small>建议改为</small><p>{comment.suggestion}</p></div>}
                   {comment.status !== 'open' && <Tag color={comment.status === 'accepted' ? 'green' : comment.status === 'rejected' ? 'red' : 'blue'}>{comment.status === 'accepted' ? '已接受' : comment.status === 'rejected' ? '已拒绝' : '已合并'}</Tag>}
@@ -302,6 +365,8 @@ export default function App() {
           ))}
         </div>
       </Modal>
+
+      <ProofModal />
 
       <footer className="app-footer">
         <span>本地草稿自动持久化 · 模拟接口用于演示多人修改后的冲突处理</span>
