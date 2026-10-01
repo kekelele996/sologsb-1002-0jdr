@@ -94,6 +94,28 @@ kbd { padding: 1px 4px; border: 1px solid #706158; border-radius: 3px; color: #f
 .version-row.changed { background: #fff9ec; }
 .composer { display: grid; gap: 8px; }
 .composer label { margin-top: 5px; color: #695e55; font-size: 11px; font-weight: 700; }
+.proof-compare { margin-top: 8px; }
+.proof-compare .ant-btn { margin-top: 7px; }
+.suspended-alert { margin-top: 8px; }
+.variant-list { display: grid; gap: 6px; margin-top: 8px; }
+.variant-item { padding: 8px 10px; border: 1px dashed #cbb9a2; border-radius: 6px; background: #fbf7ee; }
+.variant-item small { display: flex; align-items: center; gap: 6px; color: #8e8176; font-size: 9px; }
+.variant-item p { margin: 4px 0 2px; color: #57493d; font-family: Georgia, "Songti SC", serif; font-size: 12px; line-height: 1.7; }
+.variant-item .ant-btn { padding: 0; height: auto; font-size: 11px; }
+.proof-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 12px; color: #6a5f55; font-size: 12px; }
+.proof-entry-list { max-height: 520px; overflow: auto; display: grid; gap: 8px; padding-right: 4px; }
+.proof-entry { padding: 10px 12px; border: 1px solid #e4ddd5; border-radius: 8px; background: #fffefa; }
+.proof-entry.pending { border-color: #c9b3e0; }
+.proof-entry.suspended { border-color: #e8c07a; background: #fffdf6; }
+.proof-entry-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.proof-entry-head b { color: #7b3f2f; }
+.proof-entry-head .ant-btn-link { margin-left: auto; padding: 0; height: auto; font-size: 11px; }
+.proof-entry-note { margin: 6px 0 0; color: #8a7d71; font-size: 11px; }
+.proof-entry-text { margin: 6px 0 0; color: #4d4640; font-family: Georgia, "Songti SC", serif; font-size: 12px; line-height: 1.7; }
+.proof-entry .revision-grid { margin-top: 8px; }
+.proof-entry .ant-space { margin-top: 8px; }
+.split-parts { display: grid; gap: 4px; margin: 8px 0 0; padding: 0; list-style: none; }
+.split-parts li { padding: 6px 8px; border-left: 3px solid #d9b98c; background: #faf5ec; color: #57493d; font-size: 12px; line-height: 1.6; }
 .app-footer { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; height: 42px; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; color: #a99d92; background: #29241f; font-size: 10px; }
 @media (max-width: 1220px) {
   .workspace { grid-template-columns: 210px minmax(540px, 1fr) 352px; }

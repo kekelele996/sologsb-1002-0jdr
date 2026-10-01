@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowLeftOutlined, ArrowRightOutlined, BranchesOutlined, CheckOutlined, CloseOutlined,
-  CommentOutlined, DiffOutlined, DeleteOutlined, FileDoneOutlined, FileTextOutlined,
-  HistoryOutlined, LockOutlined, MenuFoldOutlined, MessageOutlined, PlusOutlined,
+  CommentOutlined, DiffOutlined, DeleteOutlined, FileDoneOutlined, FileProtectOutlined, FileTextOutlined,
+  HistoryOutlined, ImportOutlined, LockOutlined, MenuFoldOutlined, MessageOutlined, PlusOutlined,
   RedoOutlined, SaveOutlined, SendOutlined, SwapOutlined, UndoOutlined, UnlockOutlined, UserSwitchOutlined,
 } from '@ant-design/icons'
 import { Alert, Badge, Button, Card, Checkbox, Divider, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, message } from 'antd'
 import { submitRemotePatch } from './services/mockApi'
 import { useReviewStore } from './store/review'
-import type { Comment, CommentType, Paragraph, Role } from './types'
+import type { Comment, CommentType, Paragraph, ReconcileDecision, ReconcileEntry, Role } from './types'
 
 const roleMeta: Record<Role, { label: string; description: string; color: string }> = {
   author: { label: '作者工作区', description: '编辑正文，逐条接受或拒绝修改建议', color: '#2f6f5e' },
@@ -18,11 +18,36 @@ const roleMeta: Record<Role, { label: string; description: string; color: string
 const roleIcon = (role: Role) => role === 'author' ? <FileDoneOutlined /> : role === 'reviewer' ? <CommentOutlined /> : <BranchesOutlined />
 const formatDate = (value: number) => new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 
+const decisionMeta: Record<ReconcileDecision, { label: string; color: string }> = {
+  same: { label: '双方一致', color: 'default' },
+  'proof-only': { label: '排版改动 · 已套用校样', color: 'blue' },
+  'local-only': { label: '作者修订 · 已留审阅台', color: 'green' },
+  both: { label: '双方改动 · 待作者裁定', color: 'purple' },
+  split: { label: '排版拆段 · 挂起', color: 'orange' },
+  removed: { label: '排版删段 · 挂起', color: 'red' },
+}
+
+const ComparePair = ({ leftLabel, leftText, rightLabel, rightText, leftAction, rightAction }: {
+  leftLabel: string
+  leftText: string
+  rightLabel: string
+  rightText: string
+  leftAction?: React.ReactNode
+  rightAction?: React.ReactNode
+}) => (
+  <div className="revision-grid proof-compare">
+    <div><small>{leftLabel}</small><p>{leftText}</p>{leftAction}</div>
+    <div><small>{rightLabel}</small><p>{rightText}</p>{rightAction}</div>
+  </div>
+)
+
 export default function App() {
   const {
     role, paragraphs, comments, versions, selectedParagraphId, commentFilter, revisionMode, dirty, conflicts,
+    proofs, reconcileEntries, proofImporting,
     setRole, selectParagraph, setCommentFilter, setRevisionMode, updateParagraph, addComment, replyComment,
     resolveSuggestion, mergeComment, toggleLock, createVersion, addConflict, resolveConflict, dismissConflict,
+    importProof, resolveReconcileEntry, resolveSplit, resolveRemoved, swapParagraphVariant,
     undo, redo, save, resetDemo,
   } = useReviewStore()
   const [composerOpen, setComposerOpen] = useState(false)
@@ -35,6 +60,7 @@ export default function App() {
   const [versionA, setVersionA] = useState(versions[1]?.id ?? versions[0]?.id)
   const [versionB, setVersionB] = useState(versions[0]?.id)
   const [versionLabel, setVersionLabel] = useState('')
+  const [proofOpen, setProofOpen] = useState(false)
 
   const selected = paragraphs.find((paragraph) => paragraph.id === selectedParagraphId) ?? paragraphs[0]
   const sections = useMemo(() => Array.from(new Set(paragraphs.map((paragraph) => paragraph.section))), [paragraphs])
@@ -49,6 +75,16 @@ export default function App() {
     if (commentFilter === 'duplicate') return duplicateParagraphIds.has(comment.paragraphId) && comment.status === 'open'
     return true
   }).sort((a, b) => b.createdAt - a.createdAt), [commentFilter, comments, duplicateParagraphIds])
+
+  const latestProof = proofs[0]
+  const proofEntries = useMemo(() => reconcileEntries.filter((entry) => entry.proofId === latestProof?.id), [reconcileEntries, latestProof])
+  const pendingProofCount = reconcileEntries.filter((entry) => entry.status !== 'resolved').length
+  const entryByParagraph = useMemo(() => {
+    const map = new Map<string, ReconcileEntry>()
+    reconcileEntries.forEach((entry) => { if (!map.has(entry.paragraphId)) map.set(entry.paragraphId, entry) })
+    return map
+  }, [reconcileEntries])
+  const proofBaselineLabel = versions.find((version) => version.id === latestProof?.baselineVersionId)?.label
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -117,6 +153,29 @@ export default function App() {
     setVersionLabel('')
     message.success('当前版本已保存')
   }
+  const handleImportProof = async () => {
+    const result = await importProof()
+    if (result === 'duplicate') message.info('同一份校样已导入过，未重复对账建段')
+    else if (result === 'ok') message.success('校样已按段落完成对账')
+    else message.error('校样对账失败，已守住审阅台正文，可重试')
+    setProofOpen(true)
+  }
+  const pickProofSide = (entryId: string, choice: 'proof' | 'review') => {
+    resolveReconcileEntry(entryId, choice)
+    message.success(choice === 'proof' ? '已采用校样写法，审阅台版本收在段落里可换回' : '已保留审阅台版本，校样写法收在段落里可换回')
+  }
+  const handleSplit = (entryId: string, accept: boolean) => {
+    resolveSplit(entryId, accept)
+    message.success(accept ? '已按校样拆分段落，批注与回复保留在原段' : '已保留原段落，未拆分')
+  }
+  const handleRemoved = (entryId: string, confirm: boolean) => {
+    resolveRemoved(entryId, confirm)
+    message.success(confirm ? '已按校样删除该段，其意见与回复仍保留' : '已保留该段落')
+  }
+  const handleSwapVariant = (paragraphId: string, variantId: string) => {
+    swapParagraphVariant(paragraphId, variantId)
+    message.success('已换用该版本，前一版收在段落里可再换回')
+  }
   const comparedA = versions.find((version) => version.id === versionA)
   const comparedB = versions.find((version) => version.id === versionB)
   const comparedRows = comparedA && comparedB ? comparedA.paragraphs.map((paragraph, index) => ({ a: paragraph, b: comparedB.paragraphs[index] })) : []
@@ -135,6 +194,8 @@ export default function App() {
           <Badge dot={dirty}><Button icon={<SaveOutlined />} onClick={() => { save(); message.success('草稿已保存到浏览器') }}>保存</Button></Badge>
           <Button icon={<UndoOutlined />} disabled={!useReviewStore.getState().past.length} onClick={undo} />
           <Button icon={<RedoOutlined />} disabled={!useReviewStore.getState().future.length} onClick={redo} />
+          <Button icon={<ImportOutlined />} loading={proofImporting} onClick={() => void handleImportProof()}>导入校样</Button>
+          <Badge count={pendingProofCount} size="small"><Button icon={<FileProtectOutlined />} onClick={() => setProofOpen(true)}>对账单</Button></Badge>
           <Button danger={conflicts.length > 0} icon={<SwapOutlined />} onClick={() => void handleMockConflict()}>模拟冲突</Button>
         </Space>
       </header>
@@ -202,7 +263,9 @@ export default function App() {
             {sections.map((section) => (
               <section key={section} className="paper-section">
                 <h3>{section}</h3>
-                {paragraphs.filter((paragraph) => paragraph.section === section).map((paragraph) => (
+                {paragraphs.filter((paragraph) => paragraph.section === section).map((paragraph) => {
+                  const proofEntry = entryByParagraph.get(paragraph.id)
+                  return (
                   <article
                     id={`paragraph-${paragraph.id}`} key={paragraph.id} onMouseUp={() => setQuote(window.getSelection()?.toString().trim() ?? '')}
                     className={`paragraph-card ${paragraph.id === selected?.id ? 'selected' : ''} ${paragraph.highlighted ? 'highlighted' : ''} ${paragraph.status === 'locked' ? 'locked' : ''}`}
@@ -214,6 +277,10 @@ export default function App() {
                       {paragraph.status === 'locked' && <Tag icon={<LockOutlined />} color="purple">已锁定</Tag>}
                       {paragraph.status === 'accepted' && <Tag icon={<CheckOutlined />} color="green">已确认</Tag>}
                       {!!paragraphCommentCounts[paragraph.id] && <Tag icon={<MessageOutlined />}>{paragraphCommentCounts[paragraph.id]} 条意见</Tag>}
+                      {proofEntry?.decision === 'proof-only' && <Tag color="blue">已套用校样文字</Tag>}
+                      {proofEntry?.decision === 'local-only' && <Tag color="green">校样未含此修订</Tag>}
+                      {proofEntry?.decision === 'both' && proofEntry.status === 'pending' && <Tag color="purple">校样冲突待裁定</Tag>}
+                      {proofEntry?.status === 'suspended' && <Tag color="orange">{proofEntry.decision === 'split' ? '排版拆段挂起' : '排版删段挂起'}</Tag>}
                     </div>
                     {revisionMode ? (
                       <div className="revision-grid">
@@ -225,13 +292,56 @@ export default function App() {
                     ) : (
                       <p className="paragraph-text">{paragraph.text}</p>
                     )}
+                    {proofEntry?.decision === 'both' && proofEntry.status === 'pending' && (
+                      <ComparePair
+                        leftLabel="审阅台版本 · 当前" leftText={paragraph.text}
+                        rightLabel="校样写法" rightText={proofEntry.proofText}
+                        leftAction={role === 'author' ? <Button size="small" onClick={(event) => { event.stopPropagation(); pickProofSide(proofEntry.id, 'review') }}>保留此版</Button> : undefined}
+                        rightAction={role === 'author' ? <Button size="small" type="primary" onClick={(event) => { event.stopPropagation(); pickProofSide(proofEntry.id, 'proof') }}>采用此版</Button> : undefined}
+                      />
+                    )}
+                    {proofEntry?.status === 'suspended' && (
+                      <Alert
+                        className="suspended-alert" type="warning" showIcon
+                        message={proofEntry.decision === 'split' ? `排版将本段拆为 ${proofEntry.proofParts?.length ?? 2} 段，已挂起，正文暂未改动` : '排版在校样中整段删除本段，已挂起，正文暂未改动'}
+                        description={role === 'editor' ? (
+                          <Space>
+                            {proofEntry.decision === 'split' ? (
+                              <>
+                                <Button size="small" type="primary" onClick={(event) => { event.stopPropagation(); handleSplit(proofEntry.id, true) }}>接受拆分</Button>
+                                <Button size="small" onClick={(event) => { event.stopPropagation(); handleSplit(proofEntry.id, false) }}>保持原段</Button>
+                              </>
+                            ) : (
+                              <>
+                                <Button size="small" danger onClick={(event) => { event.stopPropagation(); handleRemoved(proofEntry.id, true) }}>确认删除</Button>
+                                <Button size="small" onClick={(event) => { event.stopPropagation(); handleRemoved(proofEntry.id, false) }}>保留段落</Button>
+                              </>
+                            )}
+                          </Space>
+                        ) : '等编辑在对账单中处理'}
+                      />
+                    )}
+                    {!!paragraph.variants.length && (
+                      <div className="variant-list">
+                        {paragraph.variants.map((variant) => (
+                          <div key={variant.id} className="variant-item">
+                            <small><Tag color={variant.source === 'proof' ? 'geekblue' : 'cyan'}>{variant.source === 'proof' ? '校样' : '审阅台'}</Tag>{variant.note}</small>
+                            <p>{variant.text}</p>
+                            {(role === 'author' || role === 'editor') && (
+                              <Button size="small" type="link" icon={<SwapOutlined />} onClick={(event) => { event.stopPropagation(); handleSwapVariant(paragraph.id, variant.id) }}>换用此版</Button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     <div className="paragraph-actions">
                       {role === 'reviewer' && <><Button size="small" icon={<CommentOutlined />} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openComposer('comment') }}>添加批注</Button><Button size="small" icon={<FileDoneOutlined />} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openComposer('suggestion') }}>提出建议</Button></>}
                       {role === 'editor' && <Button size="small" icon={paragraph.status === 'locked' ? <UnlockOutlined /> : <LockOutlined />} onClick={(event) => { event.stopPropagation(); toggleLock(paragraph.id) }}>{paragraph.status === 'locked' ? '解除锁定' : '锁定段落'}</Button>}
                       {role === 'author' && <span className="author-tip">可直接修改正文，右侧逐条处理建议</span>}
                     </div>
                   </article>
-                ))}
+                  )
+                })}
               </section>
             ))}
           </div>
@@ -251,7 +361,7 @@ export default function App() {
               const paragraph = paragraphs.find((item) => item.id === comment.paragraphId)
               return (
                 <Card key={comment.id} size="small" className={`comment-card ${comment.status}`} title={<span>{comment.author} <Tag>{comment.type === 'suggestion' ? '修改建议' : '段落批注'}</Tag></span>} extra={<small>{formatDate(comment.createdAt)}</small>}>
-                  <button className="quote-line" onClick={() => paragraph && scrollToParagraph(paragraph.id)}>“{comment.quote}” · 段落 {paragraph?.number}</button>
+                  <button className="quote-line" onClick={() => paragraph && scrollToParagraph(paragraph.id)}>“{comment.quote}” · {paragraph ? `段落 ${paragraph.number}` : '段落已删除'}</button>
                   <p className="comment-body">{comment.body}</p>
                   {comment.suggestion && <div className="suggestion-box"><small>建议改为</small><p>{comment.suggestion}</p></div>}
                   {comment.status !== 'open' && <Tag color={comment.status === 'accepted' ? 'green' : comment.status === 'rejected' ? 'red' : 'blue'}>{comment.status === 'accepted' ? '已接受' : comment.status === 'rejected' ? '已拒绝' : '已合并'}</Tag>}
@@ -303,8 +413,96 @@ export default function App() {
         </div>
       </Modal>
 
+      <Modal title="校样对账单" open={proofOpen} onCancel={() => setProofOpen(false)} footer={null} width={920}>
+        {!latestProof && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未导入校样。点击顶部「导入校样」，校样会按段落与审阅台正文对账，不会整段覆盖。" />}
+        {latestProof?.status === 'failed' && (
+          <Alert
+            type="error" showIcon message="校样对账失败"
+            description={`${latestProof.error ?? '校样服务异常'}。已守住审阅台这一版，正文、修订与意见均未受影响，可重试。`}
+            action={<Button size="small" loading={proofImporting} onClick={() => void handleImportProof()}>重试</Button>}
+          />
+        )}
+        {latestProof?.status === 'ok' && (
+          <>
+            <div className="proof-summary">
+              <b>{latestProof.label}</b>
+              <span>送排基线：{proofBaselineLabel ?? '未找到'}</span>
+              <span>导入：{formatDate(latestProof.importedAt)}</span>
+              <Space size={4} wrap>
+                <Tag color="blue">排版改动 {proofEntries.filter((entry) => entry.decision === 'proof-only').length}</Tag>
+                <Tag color="green">作者修订 {proofEntries.filter((entry) => entry.decision === 'local-only').length}</Tag>
+                <Tag color="purple">待裁定 {proofEntries.filter((entry) => entry.status === 'pending').length}</Tag>
+                <Tag color="orange">挂起 {proofEntries.filter((entry) => entry.status === 'suspended').length}</Tag>
+                <Tag>一致 {proofEntries.filter((entry) => entry.decision === 'same').length}</Tag>
+              </Space>
+            </div>
+            <div className="proof-entry-list">
+              {proofEntries.map((entry) => {
+                const paragraph = paragraphs.find((item) => item.id === entry.paragraphId)
+                const meta = decisionMeta[entry.decision]
+                return (
+                  <div key={entry.id} className={`proof-entry ${entry.status}`}>
+                    <div className="proof-entry-head">
+                      <b>段落 {paragraph?.number ?? '（已删除）'}</b>
+                      <Tag color={meta.color}>{meta.label}</Tag>
+                      {entry.status === 'resolved' && entry.resolvedWith && <Tag>{entry.resolvedWith === 'proof' ? '采用校样' : '保留审阅台'}</Tag>}
+                      {entry.status === 'pending' && <Tag color="warning">待作者裁定</Tag>}
+                      {entry.status === 'suspended' && <Tag color="warning">挂起待编辑</Tag>}
+                      {paragraph && <Button size="small" type="link" onClick={() => { setProofOpen(false); scrollToParagraph(paragraph.id) }}>定位</Button>}
+                    </div>
+                    {entry.note && <p className="proof-entry-note">{entry.note}</p>}
+                    {entry.decision === 'proof-only' && (
+                      <ComparePair leftLabel="审阅台原文字" leftText={entry.reviewText} rightLabel="校样文字 · 已套用" rightText={entry.proofText} />
+                    )}
+                    {entry.decision === 'local-only' && (
+                      <ComparePair leftLabel="审阅台版本 · 已保留" leftText={entry.reviewText} rightLabel="校样写法 · 对照" rightText={entry.proofText} />
+                    )}
+                    {entry.decision === 'both' && (
+                      <ComparePair
+                        leftLabel={entry.status === 'resolved' && entry.resolvedWith === 'review' ? '审阅台版本 · 已选定' : '审阅台版本'}
+                        leftText={entry.reviewText}
+                        rightLabel={entry.status === 'resolved' && entry.resolvedWith === 'proof' ? '校样写法 · 已选定' : '校样写法'}
+                        rightText={entry.proofText}
+                        leftAction={entry.status === 'pending' && role === 'author' ? <Button size="small" onClick={() => pickProofSide(entry.id, 'review')}>保留此版</Button> : undefined}
+                        rightAction={entry.status === 'pending' && role === 'author' ? <Button size="small" type="primary" onClick={() => pickProofSide(entry.id, 'proof')}>采用此版</Button> : undefined}
+                      />
+                    )}
+                    {entry.decision === 'split' && (
+                      <>
+                        <ul className="split-parts">
+                          {(entry.proofParts ?? []).map((part, index) => <li key={index}>分段 {index + 1}：{part}</li>)}
+                        </ul>
+                        {entry.status === 'suspended' && role === 'editor' && (
+                          <Space>
+                            <Button size="small" type="primary" onClick={() => handleSplit(entry.id, true)}>接受拆分</Button>
+                            <Button size="small" onClick={() => handleSplit(entry.id, false)}>保持原段</Button>
+                          </Space>
+                        )}
+                      </>
+                    )}
+                    {entry.decision === 'removed' && (
+                      <>
+                        <p className="proof-entry-text">{entry.reviewText}</p>
+                        {entry.status === 'suspended' && role === 'editor' && (
+                          <Space>
+                            <Button size="small" danger onClick={() => handleRemoved(entry.id, true)}>确认删除</Button>
+                            <Button size="small" onClick={() => handleRemoved(entry.id, false)}>保留段落</Button>
+                          </Space>
+                        )}
+                        {entry.status === 'suspended' && role !== 'editor' && <p className="proof-entry-note">删除前会保留该段上的意见与回复，等编辑确认。</p>}
+                      </>
+                    )}
+                    {entry.decision === 'same' && <p className="proof-entry-text">{entry.reviewText}</p>}
+                  </div>
+                )
+              })}
+            </div>
+          </>
+        )}
+      </Modal>
+
       <footer className="app-footer">
-        <span>本地草稿自动持久化 · 模拟接口用于演示多人修改后的冲突处理</span>
+        <span>本地草稿自动持久化 · 模拟接口用于演示多人冲突处理与校样按段落对账</span>
         <Button type="text" size="small" icon={<DeleteOutlined />} onClick={() => { resetDemo(); message.success('已重置示例数据') }}>重置示例</Button>
       </footer>
     </div>
